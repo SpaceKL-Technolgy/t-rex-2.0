@@ -2,9 +2,9 @@
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const W = 800, H = 300, GROUND = 252;
-const GRAVITY = 0.55, JUMP_FORCE = -13, BASE_SPEED = 5;
+const GRAVITY = 0.42, JUMP_FORCE = -13, BASE_SPEED = 5;
 const DW = 44, DH = 52;
-const SCORE_PER_LEVEL = 1000;
+const SCORE_PER_LEVEL = 100;
 
 // ─── Biome Backgrounds ────────────────────────────────────────────────────────
 const BIOS = [
@@ -24,11 +24,15 @@ const SKINS = [
   { name:'Gold',    body:'#F9A825', dark:'#E65100', belly:'#FFEE58', eye:'#FFF', pupil:'#000' },
 ];
 
+// Each biome auto-selects a matching skin (index into SKINS) unless the player overrides.
+// Desert→Classic, Savanna→Gold, Night City→Ice, Volcanic→Fire, Deep Space→Shadow
+const BIOME_SKIN = [0, 4, 2, 1, 3];
+
 // ─── State ────────────────────────────────────────────────────────────────────
 let canvas, ctx;
 let state = 'intro'; // 'intro' | 'running' | 'gameover'
 let score, hiScore, level, speed, tick;
-let skinIdx;
+let skinIdx, skinManual;
 let dino, obstacles, powerups, particles, clouds, stars;
 let spawnTick, spawnGap, puTick, puGap;
 let lvlMsg;
@@ -42,6 +46,7 @@ function init() {
 
   hiScore = Number(localStorage.getItem('trex2_hi')) || 0;
   skinIdx = Number(localStorage.getItem('trex2_skin')) || 0;
+  skinManual = localStorage.getItem('trex2_skinManual') === '1';
 
   document.addEventListener('keydown', onKey);
   canvas.addEventListener('mousedown', onTap);
@@ -61,6 +66,9 @@ function resetGame() {
   puTick = 0;
   puGap = 720;
   lvlMsg = { on: false, timer: 0, lv: 0 };
+
+  // Auto-match skin to the starting biome unless the player picked one manually.
+  if (!skinManual) skinIdx = BIOME_SKIN[level - 1];
 
   dino = { x:80, y:GROUND - DH, vy:0, jumping:false, legF:0, legT:0, powered:false, powerT:0 };
 
@@ -83,7 +91,9 @@ function onKey(e) {
   if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); doJump(); }
   if (e.key >= '1' && e.key <= '5') {
     skinIdx = Number(e.key) - 1;
+    skinManual = true;
     localStorage.setItem('trex2_skin', skinIdx);
+    localStorage.setItem('trex2_skinManual', '1');
   }
 }
 function onTap(e) { e.preventDefault(); doJump(); }
@@ -148,6 +158,7 @@ function update() {
   const newLv = Math.min(Math.floor(score / SCORE_PER_LEVEL) + 1, BIOS.length);
   if (newLv > level) {
     level = newLv;
+    if (!skinManual) skinIdx = BIOME_SKIN[level - 1]; // skin follows the new atmosphere
     lvlMsg = { on:true, timer:130, lv:level };
     burst(W/2, H/2, '#FFD700', 35);
   }
@@ -315,11 +326,13 @@ function drawDino() {
 
   // Power aura
   if (pw) {
-    const ag = ctx.createRadialGradient(x+22, y+28, 4, x+22, y+28, 40);
-    ag.addColorStop(0, `rgba(255,215,0,${0.22 + 0.16*Math.sin(tick*0.25)})`);
-    ag.addColorStop(1, 'rgba(255,215,0,0)');
+    const pulseAlpha = 0.22 + 0.16*Math.sin(tick*0.25);
+    const ag = ctx.createRadialGradient(x+22, y+28, 4, x+22, y+28, 42);
+    ag.addColorStop(0,    `rgba(255,215,0,${pulseAlpha.toFixed(3)})`);        // gold core
+    ag.addColorStop(0.55, `rgba(255,60,0,${(pulseAlpha*0.85).toFixed(3)})`);  // red mid
+    ag.addColorStop(1,    'rgba(255,60,0,0)');                                // fade out
     ctx.fillStyle = ag;
-    ctx.beginPath(); ctx.ellipse(x+22, y+30, 40, 36, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+22, y+30, 42, 38, 0, 0, Math.PI*2); ctx.fill();
   }
 
   // Tail
@@ -414,12 +427,29 @@ function singleCactus(x, sc) {
   ctx.fillRect(x+16,gy + Math.round(h*0.14), 6, Math.round(h*0.22)); // right arm up
   ctx.fillStyle = '#4CAF50';
   ctx.fillRect(x+9, gy+4, 3, h-6);                          // highlight
+
+  // Texture: shaded right edge + ribbed spine ticks down the trunk
+  ctx.fillStyle = '#1E4D1E';
+  ctx.fillRect(x+13, gy+4, 2, h-6);                         // right-side shade
+  ctx.fillStyle = '#245A24';
+  const spineStep = 9;
+  for (let spineY = gy + 8; spineY < GROUND - 4; spineY += spineStep) {
+    ctx.fillRect(x+7, spineY, 8, 1);                        // horizontal rib tick
+  }
 }
 
 // ─── Draw Bat ─────────────────────────────────────────────────────────────────
 function drawBat(o) {
   const { x, y, wf } = o;
   const ws = Math.sin(wf) * 15;
+
+  // Orient the bat toward its flight direction (moving left) with a gentle wing-synced bank.
+  const bankTilt = -0.14 + Math.sin(wf) * 0.1;
+  const pivotX = x + 24, pivotY = y + 12;
+  ctx.save();
+  ctx.translate(pivotX, pivotY);
+  ctx.rotate(bankTilt);
+  ctx.translate(-pivotX, -pivotY);
 
   ctx.fillStyle = '#1A0D2E';
   // Left wing
@@ -464,6 +494,8 @@ function drawBat(o) {
   ctx.fillStyle = '#ECEFF1';
   ctx.fillRect(x+21, y+18, 3, 5);
   ctx.fillRect(x+27, y+18, 3, 5);
+
+  ctx.restore();
 }
 
 // ─── Draw Asteroid ────────────────────────────────────────────────────────────
@@ -508,8 +540,9 @@ function drawPowerUp(p) {
 
   // Outer glow
   const og = ctx.createRadialGradient(px, py, 0, px, py, r+12);
-  og.addColorStop(0, 'rgba(255,220,50,0.38)');
-  og.addColorStop(1, 'rgba(255,220,50,0)');
+  og.addColorStop(0,   'rgba(255,220,50,0.40)'); // gold core
+  og.addColorStop(0.6, 'rgba(255,70,0,0.22)');   // red halo
+  og.addColorStop(1,   'rgba(255,70,0,0)');       // fade out
   ctx.fillStyle = og;
   ctx.beginPath(); ctx.arc(px, py, r+12, 0, Math.PI*2); ctx.fill();
 
@@ -563,7 +596,8 @@ function drawHUD() {
   ctx.font = '11px monospace';
   ctx.fillStyle = 'rgba(0,0,0,0.38)';
   ctx.fillText(BIOS[Math.min(level-1,BIOS.length-1)].name.toUpperCase(), 18, 42);
-  ctx.fillText(`SKIN: ${SKINS[skinIdx].name}`, 18, 57);
+  const skinPercent = Math.round(((skinIdx + 1) / SKINS.length) * 100);
+  ctx.fillText(`SKIN: ${SKINS[skinIdx].name} ${skinPercent}%`, 18, 57);
 
   // Power bar
   if (dino.powered) {
