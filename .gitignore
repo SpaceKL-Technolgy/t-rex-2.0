@@ -21,3 +21,5 @@ node_modules/
 # Environment
 .env
 .env.local
+
+.env.development.local
