@@ -2,9 +2,12 @@
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const W = 800, H = 300, GROUND = 252;
-const GRAVITY = 0.42, JUMP_FORCE = -13, BASE_SPEED = 5;
+const GRAVITY = 0.52, JUMP_FORCE = -12, BASE_SPEED = 5;
 const DW = 44, DH = 52;
 const SCORE_PER_LEVEL = 100;
+const SCORE_CAP = 999;
+const POWER_DURATION = 460;
+const BG_BLEND_STEP = 0.012;
 
 // ─── Biome Backgrounds ────────────────────────────────────────────────────────
 const BIOS = [
@@ -36,6 +39,7 @@ let skinIdx, skinManual;
 let dino, obstacles, powerups, particles, clouds, stars;
 let spawnTick, spawnGap, puTick, puGap;
 let lvlMsg;
+let bgFrom, bgBlend; // smooth cross-fade between biomes on level-up
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 function init() {
@@ -64,8 +68,10 @@ function resetGame() {
   spawnTick = 0;
   spawnGap = 90;
   puTick = 0;
-  puGap = 720;
+  puGap = 900;
   lvlMsg = { on: false, timer: 0, lv: 0 };
+  bgFrom = null;
+  bgBlend = 1;
 
   // Auto-match skin to the starting biome unless the player picked one manually.
   if (!skinManual) skinIdx = BIOME_SKIN[level - 1];
@@ -139,6 +145,14 @@ function spawnPowerUp() {
 function hit(ax,ay,aw,ah, bx,by,bw,bh) {
   return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
 }
+// Circle-vs-rect test: the asteroid sprite rotates, so a fixed axis-aligned
+// box drifts out of sync with its silhouette. A circle stays accurate at any angle.
+function circleRectHit(cx, cy, r, rx, ry, rw, rh) {
+  const nx = Math.max(rx, Math.min(cx, rx+rw));
+  const ny = Math.max(ry, Math.min(cy, ry+rh));
+  const dx = cx-nx, dy = cy-ny;
+  return dx*dx + dy*dy < r*r;
+}
 function dinoBox() {
   return { x:dino.x+8, y:dino.y+6, w:DW-14, h:DH-6 };
 }
@@ -150,13 +164,16 @@ function obsBox(o) {
 
 // ─── Update ───────────────────────────────────────────────────────────────────
 function update() {
-  score  += 0.1;
+  score  = Math.min(score + 0.1, SCORE_CAP);
   speed  += 0.0008;
   spawnGap = Math.max(42, 90 - speed * 2.5);
+  if (bgBlend < 1) bgBlend = Math.min(1, bgBlend + BG_BLEND_STEP);
 
   // Level check
   const newLv = Math.min(Math.floor(score / SCORE_PER_LEVEL) + 1, BIOS.length);
   if (newLv > level) {
+    bgFrom = BIOS[Math.min(level-1, BIOS.length-1)]; // fade out from the old biome
+    bgBlend = 0;
     level = newLv;
     if (!skinManual) skinIdx = BIOME_SKIN[level - 1]; // skin follows the new atmosphere
     lvlMsg = { on:true, timer:130, lv:level };
@@ -177,7 +194,7 @@ function update() {
 
   // Spawn
   if (++spawnTick >= spawnGap) { spawnObstacle(); spawnTick = 0; }
-  if (++puTick    >= puGap)    { spawnPowerUp();  puTick = 0; puGap = 500 + Math.random()*450; }
+  if (++puTick    >= puGap)    { spawnPowerUp();  puTick = 0; puGap = 700 + Math.random()*500; }
 
   const db = dinoBox();
   let killed = false;
@@ -189,8 +206,16 @@ function update() {
     if (o.type === 'asteroid') { o.vy = Math.min(o.vy+0.06, 8); o.y += o.vy; o.angle += 0.04; }
     if (o.x < -90 || (o.type === 'asteroid' && o.y > H+20)) return false;
 
-    const ob = obsBox(o);
-    if (hit(db.x,db.y,db.w,db.h, ob.x,ob.y,ob.w,ob.h)) {
+    // Asteroid sprite spins, so its hit test uses a circle (rotation-invariant)
+    // instead of the fixed axis-aligned box used by cactus/bat.
+    let isHit;
+    if (o.type === 'asteroid') {
+      isHit = circleRectHit(o.x, o.y, 16, db.x, db.y, db.w, db.h);
+    } else {
+      const ob = obsBox(o);
+      isHit = hit(db.x,db.y,db.w,db.h, ob.x,ob.y,ob.w,ob.h);
+    }
+    if (isHit) {
       if (dino.powered) { burst(o.x, (o.y||GROUND-30), '#FF6D00', 12); return false; }
       killed = true;
     }
@@ -204,10 +229,10 @@ function update() {
     p.x -= speed;
     p.pulse += 0.065;
     if (!p.done && hit(db.x,db.y,db.w,db.h, p.x-18,p.y-18,36,36)) {
-      p.done = true;
       dino.powered = true;
-      dino.powerT  = 380;
+      dino.powerT  = POWER_DURATION;
       burst(p.x, p.y, '#FFD700', 22);
+      return false; // bubble disappears immediately once collected
     }
     return p.x > -45;
   });
@@ -244,8 +269,23 @@ function rrect(x, y, w, h, r) {
 }
 
 // ─── Draw Background ──────────────────────────────────────────────────────────
+function lerpColor(a, b, t) {
+  const pa = parseInt(a.slice(1),16), pb = parseInt(b.slice(1),16);
+  const ar=(pa>>16)&255, ag=(pa>>8)&255, ab=pa&255;
+  const br=(pb>>16)&255, bg=(pb>>8)&255, bb=pb&255;
+  const r = Math.round(ar+(br-ar)*t), g = Math.round(ag+(bg-ag)*t), bl = Math.round(ab+(bb-ab)*t);
+  return `rgb(${r},${g},${bl})`;
+}
+
 function drawBg() {
-  const bg = BIOS[Math.min(level-1, BIOS.length-1)];
+  const target = BIOS[Math.min(level-1, BIOS.length-1)];
+  const bg = (bgBlend < 1 && bgFrom) ? {
+    ...target,
+    sky1: lerpColor(bgFrom.sky1, target.sky1, bgBlend),
+    sky2: lerpColor(bgFrom.sky2, target.sky2, bgBlend),
+    gnd:  lerpColor(bgFrom.gnd,  target.gnd,  bgBlend),
+    line: lerpColor(bgFrom.line, target.line, bgBlend),
+  } : target;
 
   const grd = ctx.createLinearGradient(0, 0, 0, GROUND);
   grd.addColorStop(0, bg.sky1);
@@ -601,7 +641,7 @@ function drawHUD() {
 
   // Power bar
   if (dino.powered) {
-    const pct = dino.powerT / 380;
+    const pct = dino.powerT / POWER_DURATION;
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fillRect(W/2-52, 8, 104, 12);
     ctx.fillStyle = `hsl(${pct*50+10},100%,55%)`;
