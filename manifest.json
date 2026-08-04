@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "T-Rex 2.0",
+  "version": "1.0.0",
+  "description": "T-Rex 2.0 — Enhanced dinosaur runner with power-ups, bats, asteroids, and 5 biomes.",
+  "chrome_url_overrides": {
+    "newtab": "game.html"
+  }
+}

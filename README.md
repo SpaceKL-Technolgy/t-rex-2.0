@@ -4,6 +4,12 @@ This is that and that game that you have never played before(gRAMMAR HAS LEFT TH
 
 YOU MUST HAVE TO DO IT!!!
 
-## OTHERWISE
 
-YOU ARE A ................
+
+# Tech stack 
+---------------
+*Javascript* <br>
+*HTML* <br>
+*CSS* <br>
+
+
