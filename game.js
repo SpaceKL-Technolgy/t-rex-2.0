@@ -1,13 +1,13 @@
 'use strict';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const W = 800, H = 300, GROUND = 252;
-const GRAVITY = 0.52, JUMP_FORCE = -12, BASE_SPEED = 5;
-const DW = 44, DH = 52;
+const W = 1600, H = 600, GROUND = 300;
+const GRAVITY = 0.52, JUMP_FORCE = -12, BASE_SPEED = 10;
+const DW = 50, DH = 60;
 const SCORE_PER_LEVEL = 100;
 const SCORE_CAP = 999;
-const POWER_DURATION = 460;
-const BG_BLEND_STEP = 0.012;
+const POWER_DURATION = 99;
+const BG_BLEND_STEP = 5;
 
 // ─── Biome Backgrounds ────────────────────────────────────────────────────────
 const BIOS = [
@@ -593,7 +593,7 @@ function drawPowerUp(p) {
   ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI*2); ctx.fill(); ctx.stroke();
 
   // Bubble shine
-  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
   ctx.beginPath(); ctx.ellipse(px-r*0.34, py-r*0.34, r*0.22, r*0.13, -0.5, 0, Math.PI*2); ctx.fill();
 
   // Lightning bolt

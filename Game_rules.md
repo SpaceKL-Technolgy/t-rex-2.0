@@ -11,4 +11,3 @@ There are a few rules in the game that is easy to learn or acquire :
     5. Dinosour will get some power up, if it can catch lightening  inside a bubble 
     6. After one thousand score level up by +1 and The background will change.
     7. speed will increase with the time. 
-git cp
