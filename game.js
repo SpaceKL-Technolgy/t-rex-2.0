@@ -4,7 +4,18 @@
 const W = 800, H = 300, GROUND = 252;
 const GRAVITY = 0.42, JUMP_FORCE = -13, BASE_SPEED = 5;
 const DW = 44, DH = 52;
-const SCORE_PER_LEVEL = 100;
+const DINO_HOME_X = 80;
+// Crouch: a low, long pose that slips under the lowest bats but stays wide enough to
+// still clip a cactus, so it can't be held down as a free pass.
+const CROUCH_H = 34, CROUCH_FALL_BOOST = 2.6;
+// Dash: a short lunge forward that eases back to the home lane on its own.
+const DASH_DISTANCE = 110, DASH_OUT_SPEED = 6, DASH_BACK_SPEED = 2.4, DASH_COOLDOWN = 90;
+const BAT_BOB = 4;
+const SCORE_PER_LEVEL = 1000;
+const POWER_UP_DURATION = 380, POWER_UP_BOB = 4;
+const ASTEROID_FALL_ACCEL = 0.06, ASTEROID_MAX_FALL = 8, ASTEROID_SPAWN_Y = -25;
+// Fixed simulation step so the game runs at the same pace on 60Hz and 120Hz+ displays.
+const FRAME_MS = 1000 / 60, MAX_CATCH_UP_STEPS = 5;
 
 // ─── Biome Backgrounds ────────────────────────────────────────────────────────
 const BIOS = [
@@ -35,7 +46,8 @@ let score, hiScore, level, speed, tick;
 let skinIdx, skinManual;
 let dino, obstacles, powerups, particles, clouds, stars;
 let spawnTick, spawnGap, puTick, puGap;
-let lvlMsg;
+let lvlMsg, newHiScore;
+let lastFrameTime = 0, frameAccumulator = 0;
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 function init() {
@@ -44,11 +56,15 @@ function init() {
   canvas.height = H;
   ctx = canvas.getContext('2d');
 
-  hiScore = Number(localStorage.getItem('trex2_hi')) || 0;
-  skinIdx = Number(localStorage.getItem('trex2_skin')) || 0;
+  const storedHiScore = Number(localStorage.getItem('trex2_hi'));
+  hiScore = Number.isFinite(storedHiScore) && storedHiScore > 0 ? Math.floor(storedHiScore) : 0;
+
+  const storedSkin = Number(localStorage.getItem('trex2_skin'));
+  skinIdx = Number.isInteger(storedSkin) && storedSkin >= 0 && storedSkin < SKINS.length ? storedSkin : 0;
   skinManual = localStorage.getItem('trex2_skinManual') === '1';
 
   document.addEventListener('keydown', onKey);
+  document.addEventListener('keyup', onKeyUp);
   canvas.addEventListener('mousedown', onTap);
   canvas.addEventListener('touchstart', onTap, { passive: false });
 
@@ -66,11 +82,13 @@ function resetGame() {
   puTick = 0;
   puGap = 720;
   lvlMsg = { on: false, timer: 0, lv: 0 };
+  newHiScore = false;
 
   // Auto-match skin to the starting biome unless the player picked one manually.
   if (!skinManual) skinIdx = BIOME_SKIN[level - 1];
 
-  dino = { x:80, y:GROUND - DH, vy:0, jumping:false, legF:0, legT:0, powered:false, powerT:0 };
+  dino = { x:DINO_HOME_X, y:GROUND - DH, vy:0, jumping:false, legF:0, legT:0,
+           powered:false, powerT:0, crouching:false, dashPhase:'idle', dashCool:0 };
 
   obstacles = [];
   powerups  = [];
@@ -88,15 +106,33 @@ function resetGame() {
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 function onKey(e) {
-  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); doJump(); }
-  if (e.key >= '1' && e.key <= '5') {
-    skinIdx = Number(e.key) - 1;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { e.preventDefault(); doJump(); }
+  if (e.code === 'ArrowDown' || e.code === 'KeyS')  { e.preventDefault(); setCrouch(true); }
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') { e.preventDefault(); doDash(); }
+  const skinKey = Number(e.key);
+  if (Number.isInteger(skinKey) && skinKey >= 1 && skinKey <= SKINS.length) {
+    skinIdx = skinKey - 1;
     skinManual = true;
     localStorage.setItem('trex2_skin', skinIdx);
     localStorage.setItem('trex2_skinManual', '1');
   }
 }
+function onKeyUp(e) {
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') { e.preventDefault(); setCrouch(false); }
+}
 function onTap(e) { e.preventDefault(); doJump(); }
+
+function setCrouch(isDown) {
+  if (state !== 'running') { dino.crouching = false; return; }
+  dino.crouching = isDown === true;
+}
+
+function doDash() {
+  if (state !== 'running') return;
+  if (dino.dashPhase !== 'idle' || dino.dashCool > 0) return;
+  dino.dashPhase = 'out';
+  burst(dino.x, GROUND - 4, '#C8A96E', 8);
+}
 
 function doJump() {
   if (state === 'intro')    { state = 'running'; return; }
@@ -123,16 +159,27 @@ function spawnObstacle() {
   if (r < 0.50) {
     obstacles.push({ type:'cactus', x: W+10, v: Math.floor(Math.random()*3) });
   } else if (r < 0.78) {
-    const hs = [GROUND-70, GROUND-105, GROUND-135];
-    obstacles.push({ type:'bat', x: W+10, y: hs[Math.floor(Math.random()*3)], wf:0 });
+    const hs = [GROUND-58, GROUND-100, GROUND-135];
+    const batHeight = hs[Math.floor(Math.random()*hs.length)];
+    obstacles.push({ type:'bat', x: W+10, y: batHeight, baseY: batHeight,
+                     bobPhase: Math.random()*Math.PI*2, wf:0 });
   } else {
-    obstacles.push({ type:'asteroid', x: W+50, y: -25,
-                     vy: 2.5 + Math.random()*2.5, angle:0 });
+    // Aim the asteroid at a ground impact point near the dino's lane: with only a
+    // downward drift it always landed mid-screen and never reached the player.
+    const spawnX    = W + 50;
+    const fallSpeed = 2.5 + Math.random()*2.5;
+    const impactX   = DINO_HOME_X - 40 + Math.random()*100;
+    const fallDist  = GROUND - ASTEROID_SPAWN_Y;
+    const fallTime  = (-fallSpeed + Math.sqrt(fallSpeed*fallSpeed + 4*ASTEROID_FALL_ACCEL*fallDist))
+                      / (2*ASTEROID_FALL_ACCEL);
+    obstacles.push({ type:'asteroid', x: spawnX, y: ASTEROID_SPAWN_Y,
+                     vx: (spawnX - impactX) / fallTime,
+                     vy: fallSpeed, angle:0 });
   }
 }
 
 function spawnPowerUp() {
-  powerups.push({ x: W+10, y: GROUND-95-Math.random()*55, pulse:Math.random()*Math.PI*2, done:false });
+  powerups.push({ x: W+10, y: GROUND-95-Math.random()*55, pulse:Math.random()*Math.PI*2 });
 }
 
 // ─── Collision ────────────────────────────────────────────────────────────────
@@ -140,6 +187,10 @@ function hit(ax,ay,aw,ah, bx,by,bw,bh) {
   return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
 }
 function dinoBox() {
+  // Crouching swaps the tall box for a low, longer one that clears the lowest bats.
+  if (dino.crouching && !dino.jumping) {
+    return { x:dino.x+6, y:GROUND-CROUCH_H+4, w:DW, h:CROUCH_H-4 };
+  }
   return { x:dino.x+8, y:dino.y+6, w:DW-14, h:DH-6 };
 }
 function obsBox(o) {
@@ -163,14 +214,31 @@ function update() {
     burst(W/2, H/2, '#FFD700', 35);
   }
 
-  // Dino physics
+  // Dino physics — holding crouch in mid-air drops the dino faster.
   if (dino.jumping) {
-    dino.vy += GRAVITY;
+    dino.vy += dino.crouching ? GRAVITY * CROUCH_FALL_BOOST : GRAVITY;
     dino.y  += dino.vy;
     if (dino.y >= GROUND - DH) { dino.y = GROUND - DH; dino.vy = 0; dino.jumping = false; }
   } else {
     dino.legT++;
     if (dino.legT >= 8) { dino.legT = 0; dino.legF ^= 1; }
+  }
+
+  // Dash: lunge forward, then coast back to the home lane and start cooling down.
+  if (dino.dashCool > 0) dino.dashCool--;
+  if (dino.dashPhase === 'out') {
+    dino.x += DASH_OUT_SPEED;
+    if (dino.x >= DINO_HOME_X + DASH_DISTANCE) {
+      dino.x = DINO_HOME_X + DASH_DISTANCE;
+      dino.dashPhase = 'back';
+    }
+  } else if (dino.dashPhase === 'back') {
+    dino.x -= DASH_BACK_SPEED;
+    if (dino.x <= DINO_HOME_X) {
+      dino.x = DINO_HOME_X;
+      dino.dashPhase = 'idle';
+      dino.dashCool  = DASH_COOLDOWN;
+    }
   }
 
   if (dino.powered && --dino.powerT <= 0) dino.powered = false;
@@ -184,10 +252,17 @@ function update() {
 
   // Obstacles
   obstacles = obstacles.filter(o => {
-    o.x -= speed;
-    if (o.type === 'bat')      { o.wf += 0.14; o.y += Math.sin(tick*0.04)*0.4; }
-    if (o.type === 'asteroid') { o.vy = Math.min(o.vy+0.06, 8); o.y += o.vy; o.angle += 0.04; }
-    if (o.x < -90 || (o.type === 'asteroid' && o.y > H+20)) return false;
+    o.x -= o.type === 'asteroid' ? o.vx : speed;
+    // Bob around the spawn height; the old += drifted the bat off its lane over time.
+    if (o.type === 'bat') { o.wf += 0.14; o.y = o.baseY + Math.sin(tick*0.04 + o.bobPhase)*BAT_BOB; }
+    if (o.type === 'asteroid') {
+      o.vy = Math.min(o.vy + ASTEROID_FALL_ACCEL, ASTEROID_MAX_FALL);
+      o.y  += o.vy;
+      o.angle += 0.04;
+      // Burst on impact instead of sinking through the ground band.
+      if (o.y >= GROUND) { burst(o.x, GROUND, '#FF6D00', 12); return false; }
+    }
+    if (o.x < -90) return false;
 
     const ob = obsBox(o);
     if (hit(db.x,db.y,db.w,db.h, ob.x,ob.y,ob.w,ob.h)) {
@@ -203,19 +278,17 @@ function update() {
   powerups = powerups.filter(p => {
     p.x -= speed;
     p.pulse += 0.065;
-    if (!p.done && hit(db.x,db.y,db.w,db.h, p.x-18,p.y-18,36,36)) {
-      p.done = true;
+    const bobY = p.y + Math.sin(p.pulse) * POWER_UP_BOB; // match the drawn position
+    if (hit(db.x,db.y,db.w,db.h, p.x-18,bobY-18,36,36)) {
       dino.powered = true;
-      dino.powerT  = 380;
-      burst(p.x, p.y, '#FFD700', 22);
+      dino.powerT  = POWER_UP_DURATION;
+      burst(p.x, bobY, '#FFD700', 22);
+      return false;                                       // collected bubbles pop
     }
     return p.x > -45;
   });
 
-  // Particles
-  particles = particles.filter(p => {
-    p.x += p.vx; p.y += p.vy; p.vy += 0.13; p.life -= 0.022; return p.life > 0;
-  });
+  stepParticles();
 
   // Clouds
   clouds.forEach(c => {
@@ -228,8 +301,15 @@ function update() {
 
 function die() {
   state = 'gameover';
-  if (score > hiScore) { hiScore = score; localStorage.setItem('trex2_hi', hiScore); }
+  newHiScore = Math.floor(score) > hiScore;
+  if (newHiScore) { hiScore = Math.floor(score); localStorage.setItem('trex2_hi', String(hiScore)); }
   burst(dino.x+22, dino.y+26, '#FF3D00', 28);
+}
+
+function stepParticles() {
+  particles = particles.filter(p => {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.13; p.life -= 0.022; return p.life > 0;
+  });
 }
 
 // ─── Draw helpers ─────────────────────────────────────────────────────────────
@@ -319,34 +399,113 @@ function drawBg() {
 }
 
 // ─── Draw Dino ────────────────────────────────────────────────────────────────
+function drawPowerAura(cx, cy, rx, ry) {
+  const pulseAlpha = 0.22 + 0.16*Math.sin(tick*0.25);
+  const ag = ctx.createRadialGradient(cx, cy-2, 4, cx, cy-2, Math.max(rx, ry));
+  ag.addColorStop(0,    `rgba(255,215,0,${pulseAlpha.toFixed(3)})`);        // gold core
+  ag.addColorStop(0.55, `rgba(255,60,0,${(pulseAlpha*0.85).toFixed(3)})`);  // red mid
+  ag.addColorStop(1,    'rgba(255,60,0,0)');                                // fade out
+  ctx.fillStyle = ag;
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2); ctx.fill();
+}
+
+// Speed lines trailing the dash so the lunge reads as motion, not a teleport.
+function drawDashTrail(tailX, midY) {
+  if (dino.dashPhase === 'idle') return;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 3; i++) {
+    const lineY = midY - 10 + i*11;
+    const len   = 14 + ((tick*3 + i*7) % 12);
+    ctx.beginPath(); ctx.moveTo(tailX - 6, lineY); ctx.lineTo(tailX - 6 - len, lineY); ctx.stroke();
+  }
+  ctx.lineWidth = 1;
+}
+
+function drawCrouchDino(sk) {
+  const x  = dino.x;
+  const cy = GROUND - CROUCH_H;
+  const pw = dino.powered;
+
+  if (pw) drawPowerAura(x+26, cy+18, 44, 28);
+  drawDashTrail(x-22, cy+16);
+
+  // Tail
+  ctx.fillStyle = sk.dark;
+  ctx.fillRect(x-16, cy+6, 16, 8);
+  ctx.fillRect(x-22, cy+2, 10, 9);
+
+  // Body — flattened and stretched forward
+  ctx.fillStyle = sk.body;
+  ctx.fillRect(x, cy+6, DW-2, 18);
+
+  // Belly stripe
+  ctx.fillStyle = sk.belly;
+  ctx.fillRect(x+6, cy+14, DW-16, 9);
+
+  // Back ridges
+  ctx.fillStyle = sk.dark;
+  for (let i = 0; i < 3; i++) ctx.fillRect(x+5+i*8, cy+2, 5, 5-i);
+
+  // Head thrust forward and low
+  ctx.fillStyle = sk.body;
+  ctx.fillRect(x+28, cy+2, 24, 15);
+
+  // Snout
+  ctx.fillStyle = sk.dark;
+  ctx.fillRect(x+46, cy+6, 9, 9);
+  ctx.fillStyle = sk.belly;
+  ctx.fillRect(x+48, cy+7, 6, 6);
+  ctx.fillStyle = sk.dark;
+  ctx.fillRect(x+50, cy+8, 3, 3);
+
+  // Eye
+  ctx.fillStyle = sk.eye;
+  ctx.fillRect(x+32, cy+4, 9, 9);
+  ctx.fillStyle = sk.pupil;
+  ctx.fillRect(x+36, cy+6, 5, 5);
+  ctx.fillStyle = '#FFF';
+  ctx.fillRect(x+38, cy+6, 2, 2); // shine
+
+  // Arm tucked in
+  ctx.fillStyle = sk.body;
+  ctx.fillRect(x+22, cy+16, 9, 6);
+
+  // Legs — kept inside the crouch box so the feet land on the ground line
+  const stepForward    = dino.legF;
+  const frontLegHeight = stepForward ? 10 : 6;
+  const backLegHeight  = stepForward ? 6  : 10;
+  ctx.fillRect(x+8,  cy+21, 9, frontLegHeight);
+  ctx.fillRect(x+6,  cy+21+frontLegHeight, 11, 3);
+  ctx.fillRect(x+26, cy+21, 9, backLegHeight);
+  ctx.fillRect(x+26, cy+21+backLegHeight,  11, 3);
+
+  if (pw) drawPowerSparks(x, cy - 8);
+}
+
 function drawDino() {
   const sk = SKINS[skinIdx];
+  if (dino.crouching && !dino.jumping) { drawCrouchDino(sk); return; }
+
   const { x, y } = dino;
   const pw = dino.powered;
 
   // Power aura
-  if (pw) {
-    const pulseAlpha = 0.22 + 0.16*Math.sin(tick*0.25);
-    const ag = ctx.createRadialGradient(x+22, y+28, 4, x+22, y+28, 42);
-    ag.addColorStop(0,    `rgba(255,215,0,${pulseAlpha.toFixed(3)})`);        // gold core
-    ag.addColorStop(0.55, `rgba(255,60,0,${(pulseAlpha*0.85).toFixed(3)})`);  // red mid
-    ag.addColorStop(1,    'rgba(255,60,0,0)');                                // fade out
-    ctx.fillStyle = ag;
-    ctx.beginPath(); ctx.ellipse(x+22, y+30, 42, 38, 0, 0, Math.PI*2); ctx.fill();
-  }
+  if (pw) drawPowerAura(x+22, y+30, 42, 38);
+  drawDashTrail(x-22, y+26);
 
   // Tail
   ctx.fillStyle = sk.dark;
-  ctx.fillRect(x-14, y+24, 16, 8);
-  ctx.fillRect(x-20, y+18, 10, 10);
+  ctx.fillRect(x-14, y+20, 16, 8);
+  ctx.fillRect(x-20, y+14, 10, 10);
 
-  // Body
+  // Body — sized so the legs below it stay inside the DH-tall sprite box
   ctx.fillStyle = sk.body;
-  ctx.fillRect(x, y+20, DW-4, 28);
+  ctx.fillRect(x, y+18, DW-4, 22);
 
   // Belly stripe
   ctx.fillStyle = sk.belly;
-  ctx.fillRect(x+6, y+30, DW-18, 14);
+  ctx.fillRect(x+6, y+26, DW-18, 11);
 
   // Back ridges
   ctx.fillStyle = sk.dark;
@@ -375,39 +534,44 @@ function drawDino() {
 
   // Arm
   ctx.fillStyle = sk.body;
-  ctx.fillRect(x+16, y+28, 10, 8);
-  ctx.fillRect(x+24, y+33,  6, 4);
+  ctx.fillRect(x+16, y+24, 10, 8);
+  ctx.fillRect(x+24, y+29,  6, 4);
 
   // Legs
   ctx.fillStyle = sk.body;
+  // Legs stay inside the DH-tall sprite box: the feet used to be drawn 14px
+  // underneath the ground line, below the hitbox the dino is actually standing on.
   if (dino.jumping) {
-    ctx.fillRect(x+6,  y+46, 10, 8);
-    ctx.fillRect(x+24, y+46, 10, 8);
+    ctx.fillRect(x+6,  y+36, 10, 10);   // tucked
+    ctx.fillRect(x+24, y+36, 10, 10);
   } else {
-    const lf = dino.legF;
-    const h1 = lf ? 16 : 10, h2 = lf ? 10 : 16;
-    ctx.fillRect(x+6,  y+46, 10, h1);
-    ctx.fillRect(x+6  + (lf?0:-4),  y+46+h1, 12, 4);
-    ctx.fillRect(x+24, y+46, 10, h2);
-    ctx.fillRect(x+24 + (lf?4:0),   y+46+h2, 12, 4);
+    const stepForward    = dino.legF;
+    const frontLegHeight = stepForward ? 12 : 7;
+    const backLegHeight  = stepForward ? 7  : 12;
+    ctx.fillRect(x+6,  y+36, 10, frontLegHeight);
+    ctx.fillRect(x+6  + (stepForward?0:-4), y+36+frontLegHeight, 12, 4);
+    ctx.fillRect(x+24, y+36, 10, backLegHeight);
+    ctx.fillRect(x+24 + (stepForward?4:0),  y+36+backLegHeight,  12, 4);
   }
 
   // Lightning sparks when powered
-  if (pw) {
-    ctx.strokeStyle = '#FFD700';
-    ctx.lineWidth = 1.5;
-    ctx.globalAlpha = 0.65 + 0.35*Math.sin(tick*0.3);
-    [[-6,12],[42,16],[8,42]].forEach(([sx,sy]) => {
-      ctx.beginPath();
-      ctx.moveTo(x+sx, y+sy);
-      ctx.lineTo(x+sx+5, y+sy+5);
-      ctx.lineTo(x+sx+2, y+sy+5);
-      ctx.lineTo(x+sx+7, y+sy+13);
-      ctx.stroke();
-    });
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = 1;
-  }
+  if (pw) drawPowerSparks(x, y);
+}
+
+function drawPowerSparks(x, y) {
+  ctx.strokeStyle = '#FFD700';
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = 0.65 + 0.35*Math.sin(tick*0.3);
+  [[-6,12],[42,16],[8,42]].forEach(([sx,sy]) => {
+    ctx.beginPath();
+    ctx.moveTo(x+sx, y+sy);
+    ctx.lineTo(x+sx+5, y+sy+5);
+    ctx.lineTo(x+sx+2, y+sy+5);
+    ctx.lineTo(x+sx+7, y+sy+13);
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1;
 }
 
 // ─── Draw Cactus ──────────────────────────────────────────────────────────────
@@ -534,7 +698,7 @@ function drawAsteroid(o) {
 
 // ─── Draw Power-up ────────────────────────────────────────────────────────────
 function drawPowerUp(p) {
-  const bob = Math.sin(p.pulse) * 4;
+  const bob = Math.sin(p.pulse) * POWER_UP_BOB;
   const px = p.x, py = p.y + bob;
   const r  = 18 + Math.sin(p.pulse*1.5)*1.5;
 
@@ -596,12 +760,15 @@ function drawHUD() {
   ctx.font = '11px monospace';
   ctx.fillStyle = 'rgba(0,0,0,0.38)';
   ctx.fillText(BIOS[Math.min(level-1,BIOS.length-1)].name.toUpperCase(), 18, 42);
-  const skinPercent = Math.round(((skinIdx + 1) / SKINS.length) * 100);
-  ctx.fillText(`SKIN: ${SKINS[skinIdx].name} ${skinPercent}%`, 18, 57);
+  ctx.fillText(`SKIN: ${SKINS[skinIdx].name} (${skinIdx + 1}/${SKINS.length})`, 18, 57);
+
+  const dashReady = dino.dashPhase === 'idle' && dino.dashCool === 0;
+  ctx.fillStyle = dashReady ? 'rgba(0,0,0,0.38)' : 'rgba(0,0,0,0.16)';
+  ctx.fillText(dashReady ? 'DASH: READY' : 'DASH: ...', 18, 72);
 
   // Power bar
   if (dino.powered) {
-    const pct = dino.powerT / 380;
+    const pct = dino.powerT / POWER_UP_DURATION;
     ctx.fillStyle = 'rgba(0,0,0,0.4)';
     ctx.fillRect(W/2-52, 8, 104, 12);
     ctx.fillStyle = `hsl(${pct*50+10},100%,55%)`;
@@ -632,12 +799,10 @@ function drawHUD() {
 // ─── Screens ──────────────────────────────────────────────────────────────────
 function drawIntro() {
   drawBg();
-  dino.legT++;
-  if (dino.legT >= 10) { dino.legT = 0; dino.legF ^= 1; }
   drawDino();
 
   ctx.fillStyle = 'rgba(0,0,0,0.58)';
-  rrect(W/2-172, H/2-72, 344, 118, 14); ctx.fill();
+  rrect(W/2-200, H/2-72, 400, 118, 14); ctx.fill();  // wide enough for the full text lines
 
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 34px monospace';
@@ -646,8 +811,9 @@ function drawIntro() {
 
   ctx.fillStyle = '#CCC';
   ctx.font = '12px monospace';
-  ctx.fillText('Jump over CACTUS · Dodge BATS & ASTEROIDS', W/2, H/2+5);
-  ctx.fillText('Catch ⚡ bubbles for POWER-UP · Level up every 1000pts', W/2, H/2+22);
+  ctx.fillText('Jump CACTUS · Crouch under BATS · Dodge ASTEROIDS', W/2, H/2+5);
+  ctx.fillText(`Catch ⚡ bubbles for POWER-UP · Level up every ${SCORE_PER_LEVEL}pts`, W/2, H/2+22);
+  ctx.fillText('SPACE Jump  ·  ↓ Crouch  ·  → Dash forward', W/2, H/2+39);
 
   const blink = Math.floor(tick/28) % 2 === 0;
   ctx.fillStyle = blink ? '#FFFFFF' : 'rgba(255,255,255,0.25)';
@@ -672,7 +838,7 @@ function drawGameOver() {
   ctx.font = '18px monospace';
   ctx.fillText(`SCORE: ${Math.floor(score)}`, W/2, H/2+10);
 
-  if (Math.floor(score) > 0 && Math.floor(score) >= Math.floor(hiScore)) {
+  if (newHiScore) {
     ctx.fillStyle = '#FFD700';
     ctx.font = 'bold 13px monospace';
     ctx.fillText('✦ NEW HIGH SCORE ✦', W/2, H/2+32);
@@ -686,35 +852,48 @@ function drawGameOver() {
 }
 
 // ─── Main Loop ────────────────────────────────────────────────────────────────
-function loop() {
+// Advance the simulation exactly one 1/60s frame.
+function step() {
   tick++;
+  if (state === 'running') { update(); return; }
+  if (state === 'intro') {
+    dino.legT++;
+    if (dino.legT >= 10) { dino.legT = 0; dino.legF ^= 1; }
+    return;
+  }
+  stepParticles(); // game over: let the death burst finish falling
+}
+
+function renderScene() {
+  drawBg();
+  obstacles.forEach(o => {
+    if (o.type==='cactus')   drawCactus(o);
+    else if (o.type==='bat') drawBat(o);
+    else                     drawAsteroid(o);
+  });
+  powerups.forEach(drawPowerUp);
+  drawParticles();
+  drawDino();
+  drawHUD();
+}
+
+// Fixed-timestep loop: gameplay used to advance once per repaint, so the whole game
+// ran at double speed on a 120Hz display. Now the pace is the same everywhere.
+function loop(timeStamp) {
+  const now = typeof timeStamp === 'number' ? timeStamp : lastFrameTime;
+  if (lastFrameTime === 0) lastFrameTime = now;
+  const elapsed = now - lastFrameTime;
+  lastFrameTime = now;
+  if (Number.isFinite(elapsed) && elapsed > 0) {
+    frameAccumulator += Math.min(elapsed, FRAME_MS * MAX_CATCH_UP_STEPS);
+  }
+  while (frameAccumulator >= FRAME_MS) { frameAccumulator -= FRAME_MS; step(); }
 
   if (state === 'intro') {
     drawIntro();
-  } else if (state === 'running') {
-    update();
-    drawBg();
-    obstacles.forEach(o => {
-      if (o.type==='cactus')   drawCactus(o);
-      else if (o.type==='bat') drawBat(o);
-      else                     drawAsteroid(o);
-    });
-    powerups.forEach(drawPowerUp);
-    drawParticles();
-    drawDino();
-    drawHUD();
-  } else { // gameover
-    drawBg();
-    obstacles.forEach(o => {
-      if (o.type==='cactus')   drawCactus(o);
-      else if (o.type==='bat') drawBat(o);
-      else                     drawAsteroid(o);
-    });
-    powerups.forEach(drawPowerUp);
-    drawParticles();
-    drawDino();
-    drawHUD();
-    drawGameOver();
+  } else {
+    renderScene();
+    if (state === 'gameover') drawGameOver();
   }
 
   requestAnimationFrame(loop);
