@@ -12,6 +12,9 @@ const CROUCH_H = 34, CROUCH_FALL_BOOST = 2.6;
 const DASH_DISTANCE = 110, DASH_OUT_SPEED = 6, DASH_BACK_SPEED = 2.4, DASH_COOLDOWN = 90;
 const BAT_BOB = 4;
 const SCORE_PER_LEVEL = 1000;
+const SCORE_CAP = 99999;
+// Speed of the crossfade from the old biome's colors to the new one's on level-up.
+const BG_BLEND_STEP = 0.02;
 const POWER_UP_DURATION = 380, POWER_UP_BOB = 4;
 const ASTEROID_FALL_ACCEL = 0.06, ASTEROID_MAX_FALL = 8, ASTEROID_SPAWN_Y = -25;
 // Fixed simulation step so the game runs at the same pace on 60Hz and 120Hz+ displays.
@@ -47,6 +50,7 @@ let skinIdx, skinManual;
 let dino, obstacles, powerups, particles, clouds, stars;
 let spawnTick, spawnGap, puTick, puGap;
 let lvlMsg, newHiScore;
+let bgBlend, bgFrom;
 let lastFrameTime = 0, frameAccumulator = 0;
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
@@ -83,6 +87,8 @@ function resetGame() {
   puGap = 900;
   lvlMsg = { on: false, timer: 0, lv: 0 };
   newHiScore = false;
+  bgBlend = 1;
+  bgFrom = null;
 
   // Auto-match skin to the starting biome unless the player picked one manually.
   if (!skinManual) skinIdx = BIOME_SKIN[level - 1];
